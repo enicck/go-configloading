@@ -23,10 +23,6 @@ jobs:
         run: go mod download
       - name: Run tests with coverage
         run: go test ./... -coverprofile=coverage.out
-      - name: Filterout test and example files
-        run: |
-          grep -v "_test.go\|_example.go|examples/" coverage.out > coverage.filtered.out || true
-          mv coverage.filtered.out coverage.out
       - uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -34,6 +30,7 @@ jobs:
         with:
           args: >
             -Dsonar.go.coverage.reportPaths=coverage.out
+            -Dsonar.coverage.exclusions=**/*_test.go,**/*_example.go,**/examples/**,**/example*/
       - uses: SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
         env:
