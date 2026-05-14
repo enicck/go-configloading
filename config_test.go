@@ -18,6 +18,8 @@ type PtrEmbeddedConfig struct {
 	PtrEmbeddedField string `mapstructure:"PTR_EMBEDDED_FIELD"`
 }
 
+const MaskedString = "********"
+
 type TestConfig struct {
 	EmbeddedConfig    `mapstructure:",squash"`
 	PtrEmbeddedConfig `mapstructure:",squash"`
@@ -64,12 +66,12 @@ func TestSafeForLogging(testingT *testing.T) {
 				unexported:    "don't mask me",
 			},
 			expectedConfig: TestConfig{
-				SecretString:  "********",
+				SecretString:  MaskedString,
 				PublicString:  "public",
 				SecretInt:     0,
 				PublicInt:     456,
 				SecretUint:    0,
-				SecretBytes:   []byte("********"),
+				SecretBytes:   []byte(MaskedString),
 				SecretBool:    false,
 				SecretFloat:   0,
 				SecretComplex: 0,
@@ -86,7 +88,7 @@ func TestSafeForLogging(testingT *testing.T) {
 				SecretString: "secret",
 			},
 			expectedConfig: TestConfig{
-				SecretString: "********",
+				SecretString: MaskedString,
 			},
 		},
 		{
@@ -362,7 +364,7 @@ func TestLogValue(t *testing.T) {
 			expected: map[string]any{
 				"app_name": "MyApp",
 				"Version":  "1.0.0",
-				"Secret":   "********",
+				"Secret":   MaskedString,
 				"Port":     int64(8080),
 			},
 		},

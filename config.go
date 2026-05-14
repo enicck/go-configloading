@@ -18,7 +18,22 @@ var Logging bool = false
 // It searches for configuration files (defaulting to .env or [APP_MODE].env) in the provided paths and the current directory.
 // It also automatically binds environment variables to struct fields based on mapstructure tags.
 func ReadConfig(config any, paths ...string) error {
-	name := ".env"
+	setupViper(paths)
+
+	if err := loadPrimaryConfig(); err != nil {
+		return err
+	}
+
+	if err := bindEnvForStruct(config); err != nil {
+		return err
+	}
+
+	mergeAdditionalFiles(paths)
+
+	return viper.Unmarshal(config)
+}
+
+func setupViper(paths []string) {
 	viper.SetConfigType("env")
 	for _, path := range paths {
 		viper.AddConfigPath(path)
@@ -27,59 +42,56 @@ func ReadConfig(config any, paths ...string) error {
 
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+}
+
+func loadPrimaryConfig() error {
+	name := ".env"
 	appMode := viper.GetString("APP_MODE")
 	if appMode != "" {
 		name = fmt.Sprintf("%s.env", appMode)
 	}
 	viper.SetConfigName(name)
 
-	if err := viper.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-			// check for just .env
+	err := viper.ReadInConfig()
+	if err == nil {
+		return nil
+	}
+
+	if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+		return nil // Ignore errors other than file not found for the first attempt
+	}
+
+	// If appMode-specific file not found, try .env
+	if Logging {
+		slog.Warn("App mode config file not found, looking for .env instead")
+	}
+	viper.SetConfigName(".env")
+	err = viper.ReadInConfig()
+	if err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			if Logging {
-				slog.Warn("App mode config file not found, looking for .env instead")
-			}
-			viper.SetConfigName(".env")
-			err = viper.ReadInConfig()
-			if err != nil {
-				if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-					if Logging {
-						slog.Warn("no config file found. Using environment variables and defaults.")
-					}
-				}
+				slog.Warn("no config file found. Using environment variables and defaults.")
 			}
 		}
 	}
+	return nil
+}
 
-	if err := bindEnvForStruct(config); err != nil {
-		return err
-	}
-
-	// look for other files like eg a VERSION file etc.
+func mergeAdditionalFiles(paths []string) {
 	files := []string{}
 	for _, path := range paths {
-		// all paths that don't end with "/"
 		if !strings.HasSuffix(path, "/") {
 			files = append(files, path)
 		}
 	}
-	if len(files) != 0 {
-		for _, file := range files {
-			viper.SetConfigFile(file)
-			viper.SetConfigType("env") // Ensure it treats it as env even if it's not .env
-			if err := viper.MergeInConfig(); err != nil {
-				if Logging {
-					slog.Warn("Failed to merge files.", "file", file, "err", err)
-				}
-			}
+
+	for _, file := range files {
+		viper.SetConfigFile(file)
+		viper.SetConfigType("env")
+		if err := viper.MergeInConfig(); err != nil && Logging {
+			slog.Warn("Failed to merge files.", "file", file, "err", err)
 		}
 	}
-
-	if err := viper.Unmarshal(config); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func bindEnvForStruct(configPtr any) error {
@@ -87,43 +99,54 @@ func bindEnvForStruct(configPtr any) error {
 	if reflectType.Kind() != reflect.Ptr || reflectType.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("bindEnvForStruct expects pointer to struct, got %s", reflectType.Kind())
 	}
-	var collect func(structType reflect.Type)
+
 	seen := map[string]struct{}{}
 	keys := []string{}
-
-	collect = func(structType reflect.Type) {
-		for fieldIndex := range structType.NumField() {
-			structField := structType.Field(fieldIndex)
-
-			// Recurse into embedded structs
-			if structField.Anonymous && structField.Type.Kind() == reflect.Struct {
-				collect(structField.Type)
-				continue
-			}
-			if structField.Anonymous && structField.Type.Kind() == reflect.Ptr && structField.Type.Elem().Kind() == reflect.Struct {
-				collect(structField.Type.Elem())
-				continue
-			}
-
-			tag := structField.Tag.Get("mapstructure")
-			if tag == "" {
-				continue
-			}
-			if _, ok := seen[tag]; ok {
-				continue
-			}
-			seen[tag] = struct{}{}
-			keys = append(keys, tag)
-		}
-	}
-
-	collect(reflectType.Elem())
+	collectMapstructureKeys(reflectType.Elem(), seen, &keys)
 
 	for _, key := range keys {
 		_ = viper.BindEnv(key)
 	}
 
 	return nil
+}
+
+func collectMapstructureKeys(structType reflect.Type, seen map[string]struct{}, keys *[]string) {
+	for fieldIndex := range structType.NumField() {
+		structField := structType.Field(fieldIndex)
+
+		if handled := handleEmbeddedStruct(structField, seen, keys); handled {
+			continue
+		}
+
+		tag := structField.Tag.Get("mapstructure")
+		if tag == "" || tag == ",squash" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		*keys = append(*keys, tag)
+	}
+}
+
+func handleEmbeddedStruct(structField reflect.StructField, seen map[string]struct{}, keys *[]string) bool {
+	if !structField.Anonymous {
+		return false
+	}
+
+	if structField.Type.Kind() == reflect.Struct {
+		collectMapstructureKeys(structField.Type, seen, keys)
+		return true
+	}
+
+	if structField.Type.Kind() == reflect.Ptr && structField.Type.Elem().Kind() == reflect.Struct {
+		collectMapstructureKeys(structField.Type.Elem(), seen, keys)
+		return true
+	}
+
+	return false
 }
 
 // SafeForLogging returns a copy of the provided config with sensitive fields masked.
